@@ -22,8 +22,8 @@ jobs:
     env:
       REQUEST_ID: ${{ inputs.request_id }}
       STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
-      INPUT_CONTAINER: vm-build-input
-      OUTPUT_CONTAINER: vm-build-json
+      INPUT_CONTAINER: shubhamc11
+      OUTPUT_CONTAINER: shubhamc111
 
     steps:
       - name: Checkout repository
