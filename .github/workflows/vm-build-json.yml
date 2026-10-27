@@ -1,4 +1,4 @@
-
+```yaml
 name: VM Build Excel to JSON
 
 on:
@@ -18,9 +18,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # STEP 1: Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # STEP 2: Validate required GitHub secrets
       - name: Verify Required GitHub Secrets
         shell: pwsh
         env:
@@ -46,6 +48,7 @@ jobs:
 
           Write-Host "Required Azure secrets are configured."
 
+      # STEP 3: Login to Azure using OIDC
       - name: Azure Login using OIDC
         uses: azure/login@v2
         with:
@@ -53,6 +56,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # STEP 4: Verify Azure login
       - name: Verify Azure Login
         shell: pwsh
         env:
@@ -69,7 +73,41 @@ jobs:
           }
 
           $result | Write-Host
+          Write-Host "Azure OIDC login successful."
 
+      # STEP 5: Validate storage configuration and request ID
+      - name: Validate Pipeline Configuration
+        shell: pwsh
+        env:
+          STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          INPUT_CONTAINER: ${{ vars.VM_BUILD_INPUT_CONTAINER }}
+          OUTPUT_CONTAINER: ${{ vars.VM_BUILD_JSON_CONTAINER }}
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $required = @(
+            "STORAGE_ACCOUNT",
+            "INPUT_CONTAINER",
+            "OUTPUT_CONTAINER",
+            "REQUEST_ID"
+          )
+
+          foreach ($name in $required) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Missing GitHub variable or input: $name"
+            }
+          }
+
+          if ($env:REQUEST_ID -notmatch '^[A-Za-z0-9_-]+$') {
+            throw "Request ID contains unsupported characters."
+          }
+
+          Write-Host "Storage configuration and Request ID validated."
+
+      # STEP 6: Install ImportExcel
       - name: Install ImportExcel Module
         shell: pwsh
         run: |
@@ -82,9 +120,10 @@ jobs:
               -AllowClobber
           }
 
-          Import-Module ImportExcel
+          Import-Module ImportExcel -ErrorAction Stop
           Write-Host "ImportExcel module is ready."
 
+      # STEP 7: Download Excel from input container
       - name: Download Excel from Azure Blob
         shell: pwsh
         env:
@@ -96,14 +135,6 @@ jobs:
           $blobName = "VM_BuildSheet.xlsx"
           $excelPath = Join-Path $env:RUNNER_TEMP $blobName
 
-          if ([string]::IsNullOrWhiteSpace($env:STORAGE_ACCOUNT)) {
-            throw "Repository variable AZURE_STORAGE_ACCOUNT is missing."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:INPUT_CONTAINER)) {
-            throw "Repository variable VM_BUILD_INPUT_CONTAINER is missing."
-          }
-
           az storage blob download `
             --account-name $env:STORAGE_ACCOUNT `
             --container-name $env:INPUT_CONTAINER `
@@ -113,13 +144,19 @@ jobs:
             --only-show-errors `
             --output none
 
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $excelPath)) {
-            throw "Failed to download $blobName from container $($env:INPUT_CONTAINER)."
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download Excel from Azure Blob Storage."
+          }
+
+          if (!(Test-Path -LiteralPath $excelPath)) {
+            throw "Downloaded Excel file was not found."
           }
 
           "EXCEL_PATH=$excelPath" >> $env:GITHUB_ENV
-          Write-Host "Excel downloaded successfully."
 
+          Write-Host "Excel downloaded successfully: $blobName"
+
+      # STEP 8: Convert Excel into JSON
       - name: Convert Excel to JSON
         shell: pwsh
         env:
@@ -127,19 +164,42 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $outputPath = Join-Path $env:RUNNER_TEMP "$($env:REQUEST_ID).json"
+          $converterPath = Join-Path $env:GITHUB_WORKSPACE `
+            "scripts/Build-VMJson.ps1"
 
-          ./scripts/Build-VMJson.ps1 `
+          if (!(Test-Path -LiteralPath $converterPath)) {
+            throw "Converter script not found: $converterPath"
+          }
+
+          if (!(Test-Path -LiteralPath $env:EXCEL_PATH)) {
+            throw "Excel input file does not exist."
+          }
+
+          $outputPath = Join-Path $env:RUNNER_TEMP `
+            "$($env:REQUEST_ID).json"
+
+          & $converterPath `
             -ExcelPath $env:EXCEL_PATH `
             -RequestId $env:REQUEST_ID `
             -OutputPath $outputPath
 
-          if (!(Test-Path $outputPath)) {
+          if (!(Test-Path -LiteralPath $outputPath)) {
             throw "JSON file was not generated."
           }
 
+          $jsonContent = Get-Content `
+            -LiteralPath $outputPath `
+            -Raw
+
+          $null = ConvertFrom-Json `
+            -InputObject $jsonContent `
+            -ErrorAction Stop
+
           "JSON_PATH=$outputPath" >> $env:GITHUB_ENV
 
+          Write-Host "JSON conversion and syntax validation succeeded."
+
+      # STEP 9: Upload JSON to output container
       - name: Upload JSON to Azure Blob
         shell: pwsh
         env:
@@ -148,6 +208,10 @@ jobs:
           REQUEST_ID: ${{ inputs.request_id }}
         run: |
           $ErrorActionPreference = "Stop"
+
+          if (!(Test-Path -LiteralPath $env:JSON_PATH)) {
+            throw "JSON output file was not found."
+          }
 
           $blobName = "$($env:REQUEST_ID)/$($env:REQUEST_ID).json"
 
@@ -162,9 +226,10 @@ jobs:
             --output none
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to upload the JSON file."
+            throw "Failed to upload JSON to Azure Blob Storage."
           }
 
           Write-Host "JSON uploaded successfully."
           Write-Host "Output container: $($env:OUTPUT_CONTAINER)"
           Write-Host "Output blob: $blobName"
+```
