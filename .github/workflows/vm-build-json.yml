@@ -1,4 +1,3 @@
-```yaml
 name: VM Build Excel to JSON
 
 on:
@@ -232,4 +231,3 @@ jobs:
           Write-Host "JSON uploaded successfully."
           Write-Host "Output container: $($env:OUTPUT_CONTAINER)"
           Write-Host "Output blob: $blobName"
-```
