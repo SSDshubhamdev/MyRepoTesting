@@ -1,0 +1,112 @@
+name: VM Build Sheet to JSON
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Request ID exactly as shown in the Excel sheet'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: vm-build-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  build-json:
+    runs-on: ubuntu-latest
+    env:
+      REQUEST_ID: ${{ inputs.request_id }}
+      STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
+      INPUT_CONTAINER: vm-build-input
+      OUTPUT_CONTAINER: vm-build-json
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid Request ID format."
+            exit 1
+          fi
+          if [[ -z "$STORAGE_ACCOUNT_NAME" ]]; then
+            echo "Repository variable STORAGE_ACCOUNT_NAME is not set."
+            exit 1
+          fi
+
+      - name: Login to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download request Excel
+        shell: bash
+        run: |
+          set -euo pipefail
+          az storage blob download \
+            --auth-mode login \
+            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --container-name "$INPUT_CONTAINER" \
+            --name "$REQUEST_ID/BuildSheet.xlsx" \
+            --file "$RUNNER_TEMP/BuildSheet.xlsx" \
+            --overwrite true \
+            --only-show-errors
+          test -s "$RUNNER_TEMP/BuildSheet.xlsx"
+
+      - name: Install PowerShell and ImportExcel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module ImportExcel -Scope CurrentUser -Force -AllowClobber
+          Import-Module ImportExcel -ErrorAction Stop
+
+      - name: Generate and validate JSON
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $excelPath = Join-Path $env:RUNNER_TEMP 'BuildSheet.xlsx'
+          $outputFolder = Join-Path $env:RUNNER_TEMP 'output'
+          New-Item -ItemType Directory -Path $outputFolder -Force | Out-Null
+
+          ./scripts/Build-VMJson.ps1 `
+            -ExcelPath $excelPath `
+            -OutputFolder $outputFolder `
+            -RequestId $env:REQUEST_ID
+
+          $jsonPath = Join-Path $outputFolder "$($env:REQUEST_ID).json"
+          if (!(Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
+            throw "Expected JSON file was not generated: $jsonPath"
+          }
+          $jsonObject = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json -ErrorAction Stop
+          if ($jsonObject.validation.status -ne 'BASIC_VALIDATION_PASSED') {
+            throw 'JSON basic validation status is missing or invalid.'
+          }
+          if ($jsonObject.approval.status -ne 'NOT_VERIFIED') {
+            throw 'Unexpected approval status. Stop and investigate.'
+          }
+          Write-Host "JSON syntax and basic status verified. Deployment_ready=$($jsonObject.validation.deployment_ready)"
+
+      - name: Upload JSON without overwriting an existing request
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON_PATH="$RUNNER_TEMP/output/$REQUEST_ID.json"
+          az storage blob upload \
+            --auth-mode login \
+            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --container-name "$OUTPUT_CONTAINER" \
+            --name "$REQUEST_ID/$REQUEST_ID.json" \
+            --file "$JSON_PATH" \
+            --overwrite false \
+            --only-show-errors
+          echo "Uploaded: $OUTPUT_CONTAINER/$REQUEST_ID/$REQUEST_ID.json"
