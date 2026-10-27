@@ -1,3 +1,4 @@
+```yaml
 name: VM Build Excel to JSON
 
 on:
@@ -17,24 +18,24 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # 1. Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 2. Validate GitHub secrets
       - name: Verify Required GitHub Secrets
         shell: pwsh
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           $ErrorActionPreference = "Stop"
 
           $required = @(
             "AZURE_CLIENT_ID",
             "AZURE_TENANT_ID",
-            "SMTP_USERNAME",
-            "SMTP_APP_PASSWORD"
+            "AZURE_SUBSCRIPTION_ID"
           )
 
           foreach ($name in $required) {
@@ -47,17 +48,19 @@ jobs:
 
           Write-Host "Required secrets are configured."
 
-      - name: Azure Login using OIDC
+      # 3. Login using the NEW App Registration
+      - name: Azure Login using New OIDC App
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ inputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # 4. Verify Azure login
       - name: Verify Azure Login
         shell: pwsh
         env:
-          SUBSCRIPTION_ID: ${{ inputs.subscription_id }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -70,9 +73,10 @@ jobs:
           }
 
           $result | Write-Host
-          
-      # STEP 5: Validate storage configuration and request ID
-      - name: Validate Pipeline Configuration
+          Write-Host "Azure OIDC login successful."
+
+      # 5. Validate storage variables and request ID
+      - name: Validate Configuration
         shell: pwsh
         env:
           STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
@@ -82,18 +86,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $required = @(
+          foreach ($name in @(
             "STORAGE_ACCOUNT",
             "INPUT_CONTAINER",
             "OUTPUT_CONTAINER",
             "REQUEST_ID"
-          )
-
-          foreach ($name in $required) {
+          )) {
             $value = [Environment]::GetEnvironmentVariable($name)
 
             if ([string]::IsNullOrWhiteSpace($value)) {
-              throw "Missing GitHub variable or input: $name"
+              throw "Missing configuration: $name"
             }
           }
 
@@ -101,9 +103,9 @@ jobs:
             throw "Request ID contains unsupported characters."
           }
 
-          Write-Host "Storage configuration and Request ID validated."
+          Write-Host "Configuration validated."
 
-      # STEP 6: Install ImportExcel
+      # 6. Install ImportExcel
       - name: Install ImportExcel Module
         shell: pwsh
         run: |
@@ -119,7 +121,7 @@ jobs:
           Import-Module ImportExcel -ErrorAction Stop
           Write-Host "ImportExcel module is ready."
 
-      # STEP 7: Download Excel from input container
+      # 7. Download Excel from Azure Blob
       - name: Download Excel from Azure Blob
         shell: pwsh
         env:
@@ -141,7 +143,7 @@ jobs:
             --output none
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to download Excel from Azure Blob Storage."
+            throw "Failed to download Excel from Azure Blob."
           }
 
           if (!(Test-Path -LiteralPath $excelPath)) {
@@ -149,10 +151,9 @@ jobs:
           }
 
           "EXCEL_PATH=$excelPath" >> $env:GITHUB_ENV
+          Write-Host "Excel downloaded successfully."
 
-          Write-Host "Excel downloaded successfully: $blobName"
-
-      # STEP 8: Convert Excel into JSON
+      # 8. Convert Excel to JSON
       - name: Convert Excel to JSON
         shell: pwsh
         env:
@@ -160,42 +161,32 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $converterPath = Join-Path $env:GITHUB_WORKSPACE `
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE `
             "scripts/Build-VMJson.ps1"
 
-          if (!(Test-Path -LiteralPath $converterPath)) {
-            throw "Converter script not found: $converterPath"
-          }
-
-          if (!(Test-Path -LiteralPath $env:EXCEL_PATH)) {
-            throw "Excel input file does not exist."
+          if (!(Test-Path -LiteralPath $scriptPath)) {
+            throw "Converter script not found: $scriptPath"
           }
 
           $outputPath = Join-Path $env:RUNNER_TEMP `
             "$($env:REQUEST_ID).json"
 
-          & $converterPath `
+          & $scriptPath `
             -ExcelPath $env:EXCEL_PATH `
             -RequestId $env:REQUEST_ID `
             -OutputPath $outputPath
 
           if (!(Test-Path -LiteralPath $outputPath)) {
-            throw "JSON file was not generated."
+            throw "JSON output file was not generated."
           }
 
-          $jsonContent = Get-Content `
-            -LiteralPath $outputPath `
-            -Raw
-
-          $null = ConvertFrom-Json `
-            -InputObject $jsonContent `
-            -ErrorAction Stop
+          $jsonContent = Get-Content -LiteralPath $outputPath -Raw
+          $null = ConvertFrom-Json -InputObject $jsonContent -ErrorAction Stop
 
           "JSON_PATH=$outputPath" >> $env:GITHUB_ENV
+          Write-Host "JSON generated and validated."
 
-          Write-Host "JSON conversion and syntax validation succeeded."
-
-      # STEP 9: Upload JSON to output container
+      # 9. Upload JSON to output container
       - name: Upload JSON to Azure Blob
         shell: pwsh
         env:
@@ -222,9 +213,10 @@ jobs:
             --output none
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to upload JSON to Azure Blob Storage."
+            throw "Failed to upload JSON to Azure Blob."
           }
 
           Write-Host "JSON uploaded successfully."
           Write-Host "Output container: $($env:OUTPUT_CONTAINER)"
           Write-Host "Output blob: $blobName"
+```
