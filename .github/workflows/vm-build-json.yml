@@ -1,11 +1,11 @@
 
-name: VM Build Sheet to JSON
+name: VM Build Excel to JSON
 
 on:
   workflow_dispatch:
     inputs:
       request_id:
-        description: "Request ID exactly as shown in the Excel sheet"
+        description: "Service Request No. from the Excel"
         required: true
         type: string
 
@@ -13,138 +13,107 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: vm-build-${{ inputs.request_id }}
-  cancel-in-progress: false
-
 jobs:
   build-json:
-    runs-on: ubuntu-latest
-
-    env:
-      REQUEST_ID: ${{ inputs.request_id }}
-      STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
-      INPUT_CONTAINER: ${{ vars.VM_BUILD_INPUT_CONTAINER }}
-      OUTPUT_CONTAINER: ${{ vars.VM_BUILD_JSON_CONTAINER }}
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "ERROR: Invalid Request ID: $REQUEST_ID"
-            exit 1
-          fi
-
-          [[ -n "$STORAGE_ACCOUNT" ]] || {
-            echo "ERROR: Set repository variable AZURE_STORAGE_ACCOUNT"
-            exit 1
-          }
-
-          [[ -n "$INPUT_CONTAINER" ]] || {
-            echo "ERROR: Set repository variable VM_BUILD_INPUT_CONTAINER"
-            exit 1
-          }
-
-          [[ -n "$OUTPUT_CONTAINER" ]] || {
-            echo "ERROR: Set repository variable VM_BUILD_JSON_CONTAINER"
-            exit 1
-          }
-
-          echo "Request ID: $REQUEST_ID"
-          echo "Storage Account: $STORAGE_ACCOUNT"
-          echo "Input Container: $INPUT_CONTAINER"
-          echo "Output Container: $OUTPUT_CONTAINER"
-
-      - name: Login to Azure using OIDC
+      - name: Azure login using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Download Excel from input container
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          EXCEL_PATH="$RUNNER_TEMP/BuildSheet.xlsx"
-
-          az storage blob download \
-            --auth-mode login \
-            --account-name "$STORAGE_ACCOUNT" \
-            --container-name "$INPUT_CONTAINER" \
-            --name "$REQUEST_ID/BuildSheet.xlsx" \
-            --file "$EXCEL_PATH" \
-            --overwrite true \
-            --only-show-errors
-
-          test -s "$EXCEL_PATH"
-          echo "Excel download successful."
-
-      - name: Install ImportExcel module
+      - name: Install PowerShell Excel module
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
           Install-Module ImportExcel -Scope CurrentUser -Force -AllowClobber
-          Import-Module ImportExcel -ErrorAction Stop
 
-      - name: Generate and validate JSON
+      - name: Download Excel from Azure Blob
         shell: pwsh
+        env:
+          STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          INPUT_CONTAINER: ${{ vars.VM_BUILD_INPUT_CONTAINER }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
 
-          $excelPath = Join-Path $env:RUNNER_TEMP 'BuildSheet.xlsx'
-          $outputFolder = Join-Path $env:RUNNER_TEMP 'output'
+          $blobName = "VM_BuildSheet.xlsx"
+          $excelPath = Join-Path $env:RUNNER_TEMP $blobName
 
-          New-Item -ItemType Directory -Path $outputFolder -Force |
-            Out-Null
+          if ([string]::IsNullOrWhiteSpace($env:STORAGE_ACCOUNT)) {
+            throw "Repository variable AZURE_STORAGE_ACCOUNT is missing."
+          }
 
-          & ./scripts/Build-VMJson.ps1 `
-            -ExcelPath $excelPath `
-            -OutputFolder $outputFolder `
-            -RequestId $env:REQUEST_ID
+          if ([string]::IsNullOrWhiteSpace($env:INPUT_CONTAINER)) {
+            throw "Repository variable VM_BUILD_INPUT_CONTAINER is missing."
+          }
+
+          az storage blob download `
+            --account-name $env:STORAGE_ACCOUNT `
+            --container-name $env:INPUT_CONTAINER `
+            --name $blobName `
+            --file $excelPath `
+            --auth-mode login `
+            --only-show-errors `
+            --output none
+
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $excelPath)) {
+            throw "Failed to download $blobName from container $($env:INPUT_CONTAINER)."
+          }
+
+          "EXCEL_PATH=$excelPath" >> $env:GITHUB_ENV
+          Write-Host "Excel downloaded successfully."
+
+      - name: Convert Excel to JSON
+        shell: pwsh
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $outputPath = Join-Path $env:RUNNER_TEMP "$($env:REQUEST_ID).json"
+
+          ./scripts/Build-VMJson.ps1 `
+            -ExcelPath $env:EXCEL_PATH `
+            -RequestId $env:REQUEST_ID `
+            -OutputPath $outputPath
+
+          if (!(Test-Path $outputPath)) {
+            throw "JSON file was not generated."
+          }
+
+          "JSON_PATH=$outputPath" >> $env:GITHUB_ENV
+
+      - name: Upload JSON to Azure Blob
+        shell: pwsh
+        env:
+          STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          OUTPUT_CONTAINER: ${{ vars.VM_BUILD_JSON_CONTAINER }}
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $blobName = "$($env:REQUEST_ID)/$($env:REQUEST_ID).json"
+
+          az storage blob upload `
+            --account-name $env:STORAGE_ACCOUNT `
+            --container-name $env:OUTPUT_CONTAINER `
+            --name $blobName `
+            --file $env:JSON_PATH `
+            --auth-mode login `
+            --overwrite true `
+            --only-show-errors `
+            --output none
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Build-VMJson.ps1 failed."
+            throw "Failed to upload the JSON file."
           }
 
-          $jsonPath = Join-Path $outputFolder "$($env:REQUEST_ID).json"
-
-          if (!(Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
-            throw "JSON file was not generated: $jsonPath"
-          }
-
-          $jsonObject = Get-Content -LiteralPath $jsonPath -Raw |
-            ConvertFrom-Json -ErrorAction Stop
-
-          if ($jsonObject.validation.status -ne 'BASIC_VALIDATION_PASSED') {
-            throw "JSON basic validation failed."
-          }
-
-          Write-Host "JSON validation passed."
-          Write-Host "Deployment ready: $($jsonObject.validation.deployment_ready)"
-
-      - name: Upload JSON to output container
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          JSON_PATH="$RUNNER_TEMP/output/$REQUEST_ID.json"
-
-          az storage blob upload \
-            --auth-mode login \
-            --account-name "$STORAGE_ACCOUNT" \
-            --container-name "$OUTPUT_CONTAINER" \
-            --name "$REQUEST_ID/$REQUEST_ID.json" \
-            --file "$JSON_PATH" \
-            --overwrite true \
-            --only-show-errors
-
-          echo "JSON upload successful:"
-          echo "$OUTPUT_CONTAINER/$REQUEST_ID/$REQUEST_ID.json"
+          Write-Host "JSON uploaded successfully."
+          Write-Host "Output container: $($env:OUTPUT_CONTAINER)"
+          Write-Host "Output blob: $blobName"
