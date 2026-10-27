@@ -18,21 +18,72 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Azure login using OIDC
+      - name: Verify Required GitHub Secrets
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $required = @(
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_SUBSCRIPTION_ID"
+          )
+
+          foreach ($name in $required) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Missing GitHub secret: $name"
+            }
+          }
+
+          Write-Host "Required Azure secrets are configured."
+
+      - name: Azure Login using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Install PowerShell Excel module
+      - name: Verify Azure Login
+        shell: pwsh
+        env:
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $result = & az account show `
+            --subscription $env:SUBSCRIPTION_ID `
+            --output table 2>&1
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Azure login verification failed: $($result -join "`n")"
+          }
+
+          $result | Write-Host
+
+      - name: Install ImportExcel Module
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Install-Module ImportExcel -Scope CurrentUser -Force -AllowClobber
+
+          if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+            Install-Module ImportExcel `
+              -Scope CurrentUser `
+              -Force `
+              -AllowClobber
+          }
+
+          Import-Module ImportExcel
+          Write-Host "ImportExcel module is ready."
 
       - name: Download Excel from Azure Blob
         shell: pwsh
