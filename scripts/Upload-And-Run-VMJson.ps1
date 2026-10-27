@@ -75,18 +75,18 @@ az account set --subscription $SubscriptionId
 if ($LASTEXITCODE -ne 0) { throw 'Could not select Azure subscription. Check the subscription ID and your access.' }
 
 # Ensure containers exist. Requires Storage Blob Data Contributor (or equivalent) for the signed-in user.
-foreach ($container in @('vm-build-input','vm-build-json')) {
+foreach ($container in @('shubhamc11','shubhamc111')) {
     az storage container create --auth-mode login --account-name $StorageAccountName --name $container --only-show-errors --output none
     if ($LASTEXITCODE -ne 0) { throw "Could not create/verify container '$container'. Check permissions and account name." }
 }
 
 # Upload original file without overwriting an existing request's source.
 $blobName = "$RequestId/BuildSheet.xlsx"
-Write-Host "Uploading Excel to $StorageAccountName/vm-build-input/$blobName ..."
+Write-Host "Uploading Excel to $StorageAccountName/shubhamc11/$blobName ..."
 az storage blob upload `
     --auth-mode login `
     --account-name $StorageAccountName `
-    --container-name 'vm-build-input' `
+    --container-name 'shubhamc11' `
     --name $blobName `
     --file $ExcelPath `
     --overwrite false `
@@ -104,6 +104,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Workflow trigger failed. Excel is uploaded; ch
 Write-Host ''
 Write-Host 'SUCCESS: Excel uploaded and GitHub Actions workflow triggered.' -ForegroundColor Green
 Write-Host "Request ID: $RequestId"
-Write-Host "Input: vm-build-input/$blobName"
-Write-Host "Expected output: vm-build-json/$RequestId/$RequestId.json"
+Write-Host "Input: shubhamc11/$blobName"
+Write-Host "Expected output: shubhamc111/$RequestId/$RequestId.json"
 Write-Host "View run: https://github.com/$GitHubRepo/actions"
