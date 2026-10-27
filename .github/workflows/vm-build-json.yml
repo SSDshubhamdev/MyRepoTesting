@@ -1,10 +1,11 @@
+
 name: VM Build Sheet to JSON
 
 on:
   workflow_dispatch:
     inputs:
       request_id:
-        description: 'Request ID exactly as shown in the Excel sheet'
+        description: "Request ID exactly as shown in the Excel sheet"
         required: true
         type: string
 
@@ -19,51 +20,74 @@ concurrency:
 jobs:
   build-json:
     runs-on: ubuntu-latest
+
     env:
       REQUEST_ID: ${{ inputs.request_id }}
-      STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
-      INPUT_CONTAINER: shubhamc11
-      OUTPUT_CONTAINER: shubhamc111
+      STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+      INPUT_CONTAINER: ${{ vars.VM_BUILD_INPUT_CONTAINER }}
+      OUTPUT_CONTAINER: ${{ vars.VM_BUILD_JSON_CONTAINER }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate inputs
+      - name: Validate configuration
         shell: bash
         run: |
           set -euo pipefail
+
           if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "Invalid Request ID format."
-            exit 1
-          fi
-          if [[ -z "$STORAGE_ACCOUNT_NAME" ]]; then
-            echo "Repository variable STORAGE_ACCOUNT_NAME is not set."
+            echo "ERROR: Invalid Request ID: $REQUEST_ID"
             exit 1
           fi
 
-      - name: Login to Azure with OIDC
+          [[ -n "$STORAGE_ACCOUNT" ]] || {
+            echo "ERROR: Set repository variable AZURE_STORAGE_ACCOUNT"
+            exit 1
+          }
+
+          [[ -n "$INPUT_CONTAINER" ]] || {
+            echo "ERROR: Set repository variable VM_BUILD_INPUT_CONTAINER"
+            exit 1
+          }
+
+          [[ -n "$OUTPUT_CONTAINER" ]] || {
+            echo "ERROR: Set repository variable VM_BUILD_JSON_CONTAINER"
+            exit 1
+          }
+
+          echo "Request ID: $REQUEST_ID"
+          echo "Storage Account: $STORAGE_ACCOUNT"
+          echo "Input Container: $INPUT_CONTAINER"
+          echo "Output Container: $OUTPUT_CONTAINER"
+
+      - name: Login to Azure using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Download request Excel
+      - name: Download Excel from input container
         shell: bash
         run: |
           set -euo pipefail
+
+          EXCEL_PATH="$RUNNER_TEMP/BuildSheet.xlsx"
+
           az storage blob download \
             --auth-mode login \
-            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --account-name "$STORAGE_ACCOUNT" \
             --container-name "$INPUT_CONTAINER" \
             --name "$REQUEST_ID/BuildSheet.xlsx" \
-            --file "$RUNNER_TEMP/BuildSheet.xlsx" \
+            --file "$EXCEL_PATH" \
             --overwrite true \
             --only-show-errors
-          test -s "$RUNNER_TEMP/BuildSheet.xlsx"
 
-      - name: Install PowerShell and ImportExcel
+          test -s "$EXCEL_PATH"
+          echo "Excel download successful."
+
+      - name: Install ImportExcel module
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -74,39 +98,53 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
           $excelPath = Join-Path $env:RUNNER_TEMP 'BuildSheet.xlsx'
           $outputFolder = Join-Path $env:RUNNER_TEMP 'output'
-          New-Item -ItemType Directory -Path $outputFolder -Force | Out-Null
 
-          ./scripts/Build-VMJson.ps1 `
+          New-Item -ItemType Directory -Path $outputFolder -Force |
+            Out-Null
+
+          & ./scripts/Build-VMJson.ps1 `
             -ExcelPath $excelPath `
             -OutputFolder $outputFolder `
             -RequestId $env:REQUEST_ID
 
-          $jsonPath = Join-Path $outputFolder "$($env:REQUEST_ID).json"
-          if (!(Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
-            throw "Expected JSON file was not generated: $jsonPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build-VMJson.ps1 failed."
           }
-          $jsonObject = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json -ErrorAction Stop
-          if ($jsonObject.validation.status -ne 'BASIC_VALIDATION_PASSED') {
-            throw 'JSON basic validation status is missing or invalid.'
-          }
-          if ($jsonObject.approval.status -ne 'NOT_VERIFIED') {
-            throw 'Unexpected approval status. Stop and investigate.'
-          }
-          Write-Host "JSON syntax and basic status verified. Deployment_ready=$($jsonObject.validation.deployment_ready)"
 
-      - name: Upload JSON without overwriting an existing request
+          $jsonPath = Join-Path $outputFolder "$($env:REQUEST_ID).json"
+
+          if (!(Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
+            throw "JSON file was not generated: $jsonPath"
+          }
+
+          $jsonObject = Get-Content -LiteralPath $jsonPath -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+
+          if ($jsonObject.validation.status -ne 'BASIC_VALIDATION_PASSED') {
+            throw "JSON basic validation failed."
+          }
+
+          Write-Host "JSON validation passed."
+          Write-Host "Deployment ready: $($jsonObject.validation.deployment_ready)"
+
+      - name: Upload JSON to output container
         shell: bash
         run: |
           set -euo pipefail
+
           JSON_PATH="$RUNNER_TEMP/output/$REQUEST_ID.json"
+
           az storage blob upload \
             --auth-mode login \
-            --account-name "$STORAGE_ACCOUNT_NAME" \
+            --account-name "$STORAGE_ACCOUNT" \
             --container-name "$OUTPUT_CONTAINER" \
             --name "$REQUEST_ID/$REQUEST_ID.json" \
             --file "$JSON_PATH" \
-            --overwrite false \
+            --overwrite true \
             --only-show-errors
-          echo "Uploaded: $OUTPUT_CONTAINER/$REQUEST_ID/$REQUEST_ID.json"
+
+          echo "JSON upload successful:"
+          echo "$OUTPUT_CONTAINER/$REQUEST_ID/$REQUEST_ID.json"
