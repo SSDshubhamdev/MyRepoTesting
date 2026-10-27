@@ -17,24 +17,24 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # STEP 1: Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # STEP 2: Validate required GitHub secrets
       - name: Verify Required GitHub Secrets
         shell: pwsh
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
           $required = @(
             "AZURE_CLIENT_ID",
             "AZURE_TENANT_ID",
-            "AZURE_SUBSCRIPTION_ID"
+            "SMTP_USERNAME",
+            "SMTP_APP_PASSWORD"
           )
 
           foreach ($name in $required) {
@@ -45,21 +45,19 @@ jobs:
             }
           }
 
-          Write-Host "Required Azure secrets are configured."
+          Write-Host "Required secrets are configured."
 
-      # STEP 3: Login to Azure using OIDC
       - name: Azure Login using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          subscription-id: ${{ inputs.subscription_id }}
 
-      # STEP 4: Verify Azure login
       - name: Verify Azure Login
         shell: pwsh
         env:
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          SUBSCRIPTION_ID: ${{ inputs.subscription_id }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -72,8 +70,7 @@ jobs:
           }
 
           $result | Write-Host
-          Write-Host "Azure OIDC login successful."
-
+          
       # STEP 5: Validate storage configuration and request ID
       - name: Validate Pipeline Configuration
         shell: pwsh
